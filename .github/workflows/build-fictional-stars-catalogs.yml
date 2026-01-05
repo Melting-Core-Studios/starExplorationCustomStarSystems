@@ -1,0 +1,44 @@
+name: Build Fictional Stars catalogs
+
+on:
+  schedule:
+    # Daily at 03:17 UTC
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: "Fictional Stars"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Build catalogs
+        run: python scripts/build_catalogs.py
+
+      - name: Commit updates (if any)
+        run: |
+          cd "${GITHUB_WORKSPACE}"
+          if git diff --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "Fictional Stars/catalogs/"*.json
+          git commit -m "chore: update fictional star catalogs"
+          git push
