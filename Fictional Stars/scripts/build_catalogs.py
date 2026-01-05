@@ -20,13 +20,14 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 USER_AGENT = os.getenv(
     "CATALOG_BOT_UA",
-    "MCS-Education-CatalogBot/1.0 (+https://github.com/your-org/your-repo)"
+    "MCS-Education-CatalogBot/1.0 (+https://github.com/your-org/your-repo)",
 )
 
-# Batch sizes keep URLs manageable; 10–25 is generally safe for Fandom wikis.
 BATCH_SIZE = int(os.getenv("CATALOG_BATCH_SIZE", "20"))
+THROTTLE_S = float(os.getenv("CATALOG_THROTTLE_S", "0.15"))
+HTTP_TIMEOUT_S = int(os.getenv("CATALOG_HTTP_TIMEOUT_S", "120"))
+HTTP_RETRIES = int(os.getenv("CATALOG_HTTP_RETRIES", "6"))
 
-# Weekly deep build: fetch planet wikitext for both franchises by default.
 STARTREK_FETCH_PLANET_WIKITEXT = os.getenv("STARTREK_FETCH_PLANET_WIKITEXT", "1").strip().lower() in (
     "1", "true", "yes", "y", "on"
 )
@@ -34,21 +35,17 @@ STARWARS_FETCH_PLANET_WIKITEXT = os.getenv("STARWARS_FETCH_PLANET_WIKITEXT", "1"
     "1", "true", "yes", "y", "on"
 )
 
-# Optional: also try to map Star Wars planets via their categories.
-# Wookieepedia encourages “<System> system locations” categorization, which we can exploit.
-STARWARS_USE_CATEGORY_SYSTEM_HINTS = os.getenv("STARWARS_USE_CATEGORY_SYSTEM_HINTS", "1").strip().lower() in (
+STARWARS_INCLUDE_MOONS = os.getenv("STARWARS_INCLUDE_MOONS", "1").strip().lower() in (
     "1", "true", "yes", "y", "on"
 )
 
-# 0 = no limit. Useful for debugging locally.
-STARTREK_MAX_PLANETS = int(os.getenv("STARTREK_MAX_PLANETS", "0"))
-STARWARS_MAX_PLANETS = int(os.getenv("STARWARS_MAX_PLANETS", "0"))
+# Safety caps for recursive category walking
+STARTREK_MAX_CATEGORIES = int(os.getenv("STARTREK_MAX_CATEGORIES", "8000"))
+STARWARS_MAX_CATEGORIES = int(os.getenv("STARWARS_MAX_CATEGORIES", "8000"))
 
-HTTP_TIMEOUT_S = int(os.getenv("CATALOG_HTTP_TIMEOUT_S", "120"))
-HTTP_RETRIES = int(os.getenv("CATALOG_HTTP_RETRIES", "6"))
-
-# Small sleep between requests to be a good citizen and reduce 429s.
-THROTTLE_S = float(os.getenv("CATALOG_THROTTLE_S", "0.15"))
+# Optional hard caps (0 = no cap)
+STARTREK_MAX_BODIES = int(os.getenv("STARTREK_MAX_BODIES", "0"))
+STARWARS_MAX_BODIES = int(os.getenv("STARWARS_MAX_BODIES", "0"))
 
 
 # ----------------------------
@@ -56,7 +53,6 @@ THROTTLE_S = float(os.getenv("CATALOG_THROTTLE_S", "0.15"))
 # ----------------------------
 
 def _sleep_backoff(attempt: int) -> None:
-    # exponential backoff + jitter (cap at 60s)
     time.sleep(min(60.0, (2 ** attempt) + random.random() * 2.0))
 
 
@@ -67,17 +63,13 @@ def http_get_json(url: str, timeout: int = HTTP_TIMEOUT_S, retries: int = HTTP_R
         try:
             req = urllib.request.Request(
                 url,
-                headers={
-                    "User-Agent": USER_AGENT,
-                    "Accept": "application/json",
-                },
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = resp.read().decode("utf-8", errors="replace")
             return json.loads(data)
 
         except urllib.error.HTTPError as e:
-            # Retry on rate-limit / transient server errors
             if e.code in (429, 500, 502, 503, 504):
                 last_err = e
                 _sleep_backoff(attempt)
@@ -101,16 +93,17 @@ def chunked(items: List[str], n: int) -> Iterable[List[str]]:
         yield items[i:i + n]
 
 
-def mw_category_members(
+def mw_category_members_typed(
     api_base: str,
     category_title: str,
-    namespace: int = 0,
     limit: int = 200,
-) -> List[str]:
+) -> Tuple[List[str], List[str]]:
     """
-    Return all page titles in Category:<category_title> in given namespace using list=categorymembers.
+    Returns (pages_in_main_namespace, subcategories) for Category:<category_title>.
+    Uses list=categorymembers with cmtype=page|subcat and cmnamespace=0|14 to avoid files, etc.
     """
-    titles: List[str] = []
+    pages: List[str] = []
+    subcats: List[str] = []
     cmcontinue: Optional[str] = None
 
     while True:
@@ -118,7 +111,8 @@ def mw_category_members(
             "action": "query",
             "list": "categorymembers",
             "cmtitle": f"Category:{category_title}",
-            "cmnamespace": str(namespace),
+            "cmtype": "page|subcat",
+            "cmnamespace": "0|14",
             "cmlimit": str(limit),
             "format": "json",
             "formatversion": "2",
@@ -128,10 +122,20 @@ def mw_category_members(
 
         payload = http_get_json(mw_api_url(api_base, params))
         members = (payload.get("query") or {}).get("categorymembers") or []
+
         for m in members:
-            t = m.get("title")
-            if t:
-                titles.append(t)
+            title = m.get("title")
+            mtype = m.get("type")
+            if not title:
+                continue
+            if mtype == "page":
+                pages.append(title)
+            elif mtype == "subcat":
+                # Convert "Category:Ice planets" -> "Ice planets"
+                if title.startswith("Category:"):
+                    subcats.append(title.split("Category:", 1)[1])
+                else:
+                    subcats.append(title)
 
         cmcontinue = (payload.get("continue") or {}).get("cmcontinue")
         if not cmcontinue:
@@ -139,15 +143,43 @@ def mw_category_members(
 
         time.sleep(THROTTLE_S)
 
-    return titles
+    return pages, subcats
+
+
+def mw_category_pages_recursive(
+    api_base: str,
+    root_category: str,
+    *,
+    max_categories: int,
+) -> List[str]:
+    """
+    BFS walk: return all mainspace pages in root category + all subcategories (recursive).
+    """
+    seen_cats: set[str] = set()
+    seen_pages: set[str] = set()
+    queue: List[str] = [root_category]
+
+    while queue:
+        cat = queue.pop(0)
+        if cat in seen_cats:
+            continue
+        seen_cats.add(cat)
+
+        pages, subcats = mw_category_members_typed(api_base, cat)
+        for p in pages:
+            seen_pages.add(p)
+        for sc in subcats:
+            if sc not in seen_cats and len(seen_cats) < max_categories:
+                queue.append(sc)
+
+        if len(seen_cats) >= max_categories:
+            break
+
+    return sorted(seen_pages, key=lambda s: s.lower())
 
 
 def mw_pages_wikitext_bulk(api_base: str, titles: List[str]) -> Dict[str, str]:
-    """
-    Fetch wikitext for multiple titles per request (batching) to reduce request count.
-    """
     out: Dict[str, str] = {}
-
     for batch in chunked(titles, BATCH_SIZE):
         params = {
             "action": "query",
@@ -158,7 +190,7 @@ def mw_pages_wikitext_bulk(api_base: str, titles: List[str]) -> Dict[str, str]:
             "format": "json",
             "formatversion": "2",
         }
-        payload = http_get_json(mw_api_url(api_base, params))
+        payload = http_get_json(mw_api_url(api_base, params), timeout=max(HTTP_TIMEOUT_S, 120))
         pages = (payload.get("query") or {}).get("pages") or []
 
         for p in pages:
@@ -179,12 +211,7 @@ def mw_pages_wikitext_bulk(api_base: str, titles: List[str]) -> Dict[str, str]:
 
 
 def mw_pages_categories_bulk(api_base: str, titles: List[str], per_page_limit: int = 500) -> Dict[str, List[str]]:
-    """
-    Fetch categories for multiple pages per request.
-    Returns dict: {title: ["Category:Foo", "Category:Bar", ...]}
-    """
     out: Dict[str, List[str]] = {}
-
     for batch in chunked(titles, BATCH_SIZE):
         params = {
             "action": "query",
@@ -196,16 +223,13 @@ def mw_pages_categories_bulk(api_base: str, titles: List[str], per_page_limit: i
         }
         payload = http_get_json(mw_api_url(api_base, params))
         pages = (payload.get("query") or {}).get("pages") or []
-
         for p in pages:
             title = p.get("title")
             if not title:
                 continue
             cats = p.get("categories") or []
             out[title] = [c.get("title") for c in cats if c.get("title")]
-
         time.sleep(THROTTLE_S)
-
     return out
 
 
@@ -222,12 +246,9 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 def strip_wiki_markup(value: str) -> str:
     value = value.strip()
 
-    # [[Target|Label]] -> Label ; [[Target]] -> Target
     def _repl(m: re.Match) -> str:
         inner = m.group(1)
-        if "|" in inner:
-            return inner.split("|", 1)[1].strip()
-        return inner.strip()
+        return inner.split("|", 1)[1].strip() if "|" in inner else inner.strip()
 
     value = _WIKILINK_RE.sub(_repl, value)
     value = _TEMPLATE_RE.sub("", value)
@@ -236,36 +257,26 @@ def strip_wiki_markup(value: str) -> str:
     return value.strip()
 
 
-def _canon_key(name: str) -> str:
-    # A conservative canonical key for matching.
+def canon_key(name: str) -> str:
     return re.sub(r"\s+", " ", name.strip().lower())
 
 
-def _try_match_system_name(system_index: Dict[str, dict], raw: str) -> Optional[dict]:
-    """
-    Try multiple match strategies:
-      - exact
-      - add/remove " system"
-    """
+def try_match_system(system_index: Dict[str, dict], raw: str) -> Optional[dict]:
     if not raw:
         return None
-
     raw_clean = re.sub(r"\s+", " ", raw.strip())
-    k = _canon_key(raw_clean)
+    k = canon_key(raw_clean)
 
-    # exact
     if k in system_index:
         return system_index[k]
 
-    # if "system" missing, try append
+    # Try adding/removing " system"
     if not k.endswith(" system"):
-        k2 = _canon_key(raw_clean + " system")
+        k2 = canon_key(raw_clean + " system")
         if k2 in system_index:
             return system_index[k2]
-
-    # if it ends with " system", try removing
-    if k.endswith(" system"):
-        k3 = _canon_key(re.sub(r"\s+system$", "", raw_clean, flags=re.IGNORECASE))
+    else:
+        k3 = canon_key(re.sub(r"\s+system$", "", raw_clean, flags=re.IGNORECASE))
         if k3 in system_index:
             return system_index[k3]
 
@@ -273,49 +284,32 @@ def _try_match_system_name(system_index: Dict[str, dict], raw: str) -> Optional[
 
 
 def extract_system_from_value(value: str) -> Optional[str]:
-    """
-    From a cleaned text value, try to extract something that looks like a system name.
-    """
     if not value:
         return None
-
     v = strip_wiki_markup(value)
     if not v:
         return None
 
-    # Prefer phrases containing "... system"
     m = re.search(r"([A-Za-z0-9][^,;()\n]*?\bsystem\b)", v, flags=re.IGNORECASE)
     if m:
         s = m.group(1).strip()
-        # Avoid returning generic "star system" alone
         if s.lower() in ("system", "star system", "a star system"):
             return None
         return s
-
     return None
 
 
 def extract_system_from_wikitext(wikitext: str, param_names: List[str]) -> Optional[str]:
-    """
-    Look for common infobox parameters like:
-      | system = ...
-      | star system = ...
-      | location = ...
-    and try to extract a system-like phrase from the value.
-    """
     if not wikitext:
         return None
 
-    # Build regex patterns for each param name
-    # Example line: | system = [[Tatoo system]]
     for pn in param_names:
         rx = re.compile(rf"^\|\s*{re.escape(pn)}\s*=\s*(.+)$", flags=re.IGNORECASE)
         for line in wikitext.splitlines():
             m = rx.match(line)
             if not m:
                 continue
-            val = m.group(1).strip()
-            sys_name = extract_system_from_value(val)
+            sys_name = extract_system_from_value(m.group(1).strip())
             if sys_name:
                 return sys_name
 
@@ -324,15 +318,13 @@ def extract_system_from_wikitext(wikitext: str, param_names: List[str]) -> Optio
 
 def extract_system_from_categories(category_titles: List[str]) -> Optional[str]:
     """
-    Star Wars: derive system from categories like "Category:Coruscant system locations".
+    Star Wars: derive system from categories like "Category:Hoth system locations".
     """
     if not category_titles:
         return None
 
-    # Titles look like "Category:Something"
     cats = [c.split("Category:", 1)[1] if c.startswith("Category:") else c for c in category_titles]
 
-    # Most useful pattern per Wookieepedia policy: "<System> system locations"
     for c in cats:
         m = re.match(r"^(.+?)\s+system\s+locations$", c, flags=re.IGNORECASE)
         if m:
@@ -344,11 +336,10 @@ def extract_system_from_categories(category_titles: List[str]) -> Optional[str]:
 
 
 # ----------------------------
-# Catalog builders
+# Catalog helpers
 # ----------------------------
 
 def make_system_obj(name: str, notes: str) -> dict:
-    # Minimal schema-aligned object with placeholder star and empty planets list.
     return {
         "name": name,
         "category": "Single",
@@ -358,117 +349,160 @@ def make_system_obj(name: str, notes: str) -> dict:
     }
 
 
-def build_catalog(
-    *,
-    franchise: str,
-    api_base: str,
-    systems_category: str,
-    planets_category: str,
-    planet_param_names: List[str],
-    fetch_planet_wikitext: bool,
-    max_planets: int,
-    use_category_system_hints: bool,
-    source_label: str,
-) -> dict:
-    generated_at = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
+def load_existing_catalog(path: Path) -> Optional[dict]:
+    try:
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        if "systems" not in data or not isinstance(data["systems"], list):
+            return None
+        return data
+    except Exception:
+        return None
 
-    # 1) Systems
-    system_titles = mw_category_members(api_base, category_title=systems_category)
-    system_index: Dict[str, dict] = {}
 
-    for t in system_titles:
+def build_system_index_from_catalog(data: dict, notes_suffix: str) -> Dict[str, dict]:
+    """
+    Build an index from an existing catalog; clears planets to ensure weekly regeneration is clean.
+    """
+    systems: Dict[str, dict] = {}
+    for s in data.get("systems", []):
+        if not isinstance(s, dict):
+            continue
+        name = (s.get("name") or "").strip()
+        if not name:
+            continue
+        # shallow copy and reset planets
+        out = dict(s)
+        out["name"] = name
+        out["planets"] = []
+        out["notes"] = (out.get("notes") or "") + notes_suffix
+        # ensure stars exists
+        if not isinstance(out.get("stars"), list) or len(out["stars"]) == 0:
+            out["stars"] = [{"name": f"{name} primary", "type": "star"}]
+        systems[canon_key(name)] = out
+    return systems
+
+
+def build_from_wiki_systems(api_base: str, systems_category: str, source_label: str) -> Dict[str, dict]:
+    titles = mw_category_pages_recursive(api_base, systems_category, max_categories=4000)
+    idx: Dict[str, dict] = {}
+    for t in titles:
         name = t.strip()
-        sys_obj = make_system_obj(
+        idx[canon_key(name)] = make_system_obj(
             name=name,
             notes=f"Auto-generated from {source_label} category listings.",
         )
-        system_index[_canon_key(name)] = sys_obj
+    return idx
 
-    # Ensure a sink for planets we cannot map
-    unassigned = make_system_obj(
-        name="Unassigned system",
-        notes="Catch-all for planets whose star system could not be reliably derived from source pages.",
-    )
-    system_index[_canon_key(unassigned["name"])] = unassigned
 
-    # 2) Planets list
-    planet_titles = mw_category_members(api_base, category_title=planets_category)
-    if max_planets > 0:
-        planet_titles = planet_titles[:max_planets]
+def attach_bodies_to_systems(
+    *,
+    franchise: str,
+    api_base: str,
+    bodies: List[str],
+    system_index: Dict[str, dict],
+    unassigned: dict,
+    body_param_names: List[str],
+    use_category_system_hints: bool,
+    fetch_wikitext: bool,
+    source_label: str,
+) -> dict:
+    """
+    Attach bodies (planets/moons) to systems using category hints and/or wikitext.
+    Always includes every body: anything unmapped goes to Unassigned system.
+    """
+    created_from_bodies = 0
+    attached = 0
+    unmapped = 0
 
-    planet_summary = {
-        "enabled": True,
-        "planetPages": len(planet_titles),
-        "wikitextFetched": bool(fetch_planet_wikitext),
-        "categoryHintsUsed": bool(use_category_system_hints),
-        "attached": 0,
-        "unassigned": 0,
-        "createdSystemsFromPlanets": 0,
-    }
-
-    # Optionally prefetch categories for better system inference (Star Wars).
     categories_map: Dict[str, List[str]] = {}
-    if use_category_system_hints and planet_titles:
-        categories_map = mw_pages_categories_bulk(api_base, planet_titles)
+    if use_category_system_hints and bodies:
+        categories_map = mw_pages_categories_bulk(api_base, bodies)
 
-    # 3) Planet → System mapping (wikitext bulk)
-    if fetch_planet_wikitext and planet_titles:
-        attached = 0
-        unassigned_count = 0
-        created_from_planets = 0
-
-        for batch in chunked(planet_titles, BATCH_SIZE):
+    if fetch_wikitext and bodies:
+        for batch in chunked(bodies, BATCH_SIZE):
             texts = mw_pages_wikitext_bulk(api_base, batch)
+            for title in batch:
+                body_name = title.strip()
 
-            for pt in batch:
-                planet_name = pt.strip()
-
-                # First: category hint (if enabled)
                 sys_name: Optional[str] = None
                 if use_category_system_hints:
-                    sys_name = extract_system_from_categories(categories_map.get(pt, []))
+                    sys_name = extract_system_from_categories(categories_map.get(title, []))
 
-                # Second: infobox/wikitext inference
                 if not sys_name:
-                    sys_name = extract_system_from_wikitext(texts.get(pt, "") or "", planet_param_names)
+                    sys_name = extract_system_from_wikitext(texts.get(title, "") or "", body_param_names)
 
-                # Attach planet
                 if sys_name:
-                    sys_obj = _try_match_system_name(system_index, sys_name)
-
-                    # If the system was not in the systems category, create it to avoid losing structure
+                    sys_obj = try_match_system(system_index, sys_name)
                     if not sys_obj:
+                        # Create system if referenced but missing (prevents losing structure)
                         new_name = sys_name.strip()
                         sys_obj = make_system_obj(
                             name=new_name,
-                            notes=(
-                                f"Created from planet pages (derived system reference). "
-                                f"Source: {source_label}."
-                            ),
+                            notes=f"Created from body pages (derived system reference). Source: {source_label}.",
                         )
-                        system_index[_canon_key(new_name)] = sys_obj
-                        created_from_planets += 1
+                        system_index[canon_key(new_name)] = sys_obj
+                        created_from_bodies += 1
 
-                    sys_obj["planets"].append({"name": planet_name})
+                    sys_obj["planets"].append({"name": body_name})
                     attached += 1
                 else:
-                    unassigned["planets"].append({"name": planet_name})
-                    unassigned_count += 1
-
-        planet_summary["attached"] = attached
-        planet_summary["unassigned"] = unassigned_count
-        planet_summary["createdSystemsFromPlanets"] = created_from_planets
-
+                    unassigned["planets"].append({"name": body_name})
+                    unmapped += 1
     else:
-        # Still include all planets, but everything goes to Unassigned
-        for pt in planet_titles:
-            unassigned["planets"].append({"name": pt.strip()})
-        planet_summary["attached"] = 0
-        planet_summary["unassigned"] = len(planet_titles)
+        for title in bodies:
+            unassigned["planets"].append({"name": title.strip()})
+        unmapped = len(bodies)
 
-    # Deterministic output ordering
+    return {
+        "enabled": True,
+        "bodyPages": len(bodies),
+        "wikitextFetched": bool(fetch_wikitext),
+        "categoryHintsUsed": bool(use_category_system_hints),
+        "attached": attached,
+        "unassigned": unmapped,
+        "createdSystemsFromBodies": created_from_bodies,
+    }
+
+
+def build_startrek_catalog(catalogs_dir: Path) -> dict:
+    franchise = "Star Trek"
+    api_base = "https://memory-alpha.fandom.com/api.php"
+    source_label = "Memory Alpha (MediaWiki Action API)"
+    generated_at = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
+
+    # Systems: regenerate from wiki each time
+    system_index = build_from_wiki_systems(api_base, "Star systems", source_label)
+
+    # Ensure Unassigned sink
+    unassigned = make_system_obj(
+        "Unassigned system",
+        "Catch-all for bodies whose star system could not be reliably derived from source pages.",
+    )
+    system_index[canon_key(unassigned["name"])] = unassigned
+
+    # Bodies: planets (recursive)
+    bodies = mw_category_pages_recursive(api_base, "Planets", max_categories=STARTREK_MAX_CATEGORIES)
+    if STARTREK_MAX_BODIES > 0:
+        bodies = bodies[:STARTREK_MAX_BODIES]
+
+    planet_summary = attach_bodies_to_systems(
+        franchise=franchise,
+        api_base=api_base,
+        bodies=bodies,
+        system_index=system_index,
+        unassigned=unassigned,
+        # Best-effort parameters on Memory Alpha planet pages
+        body_param_names=["system", "star system", "starsystem"],
+        use_category_system_hints=False,
+        fetch_wikitext=STARTREK_FETCH_PLANET_WIKITEXT,
+        source_label=source_label,
+    )
+
     systems_out = sorted(system_index.values(), key=lambda s: s["name"].lower())
-
     return {
         "meta": {
             "franchise": franchise,
@@ -480,34 +514,71 @@ def build_catalog(
     }
 
 
-def build_startrek() -> dict:
-    return build_catalog(
-        franchise="Star Trek",
-        api_base="https://memory-alpha.fandom.com/api.php",
-        systems_category="Star systems",
-        planets_category="Planets",
-        # Memory Alpha: common parameters (best-effort)
-        planet_param_names=["system", "star system", "starsystem"],
-        fetch_planet_wikitext=STARTREK_FETCH_PLANET_WIKITEXT,
-        max_planets=STARTREK_MAX_PLANETS,
-        use_category_system_hints=False,
-        source_label="Memory Alpha (MediaWiki Action API)",
+def build_starwars_catalog(catalogs_dir: Path) -> dict:
+    franchise = "Star Wars"
+    api_base = "https://starwars.fandom.com/api.php"
+    source_label = "Wookieepedia (MediaWiki Action API)"
+    generated_at = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
+
+    # If you already have a huge Star Wars systems catalog (e.g., PDF-derived), keep it as baseline.
+    existing_path = catalogs_dir / "starwars_star_systems_catalog.json"
+    existing = load_existing_catalog(existing_path)
+
+    system_index: Dict[str, dict]
+    baseline_note: str
+
+    if existing and isinstance(existing.get("systems"), list) and len(existing["systems"]) >= 500:
+        # Keep large baseline
+        baseline_note = " Baseline preserved from existing catalog; planets refreshed from Wookieepedia."
+        system_index = build_system_index_from_catalog(existing, baseline_note)
+    else:
+        # Otherwise build systems from Wookieepedia category
+        baseline_note = ""
+        system_index = build_from_wiki_systems(api_base, "Star systems", source_label)
+
+    # Ensure Unassigned sink
+    unassigned = make_system_obj(
+        "Unassigned system",
+        "Catch-all for bodies whose star system could not be reliably derived from source pages.",
+    )
+    system_index[canon_key(unassigned["name"])] = unassigned
+
+    # Bodies: planets (recursive) + optionally moons (recursive)
+    planets = mw_category_pages_recursive(api_base, "Planets", max_categories=STARWARS_MAX_CATEGORIES)
+    bodies = planets
+
+    if STARWARS_INCLUDE_MOONS:
+        moons = mw_category_pages_recursive(api_base, "Moons", max_categories=STARWARS_MAX_CATEGORIES)
+        bodies = sorted(set(planets) | set(moons), key=lambda s: s.lower())
+
+    if STARWARS_MAX_BODIES > 0:
+        bodies = bodies[:STARWARS_MAX_BODIES]
+
+    planet_summary = attach_bodies_to_systems(
+        franchise=franchise,
+        api_base=api_base,
+        bodies=bodies,
+        system_index=system_index,
+        unassigned=unassigned,
+        # Wookieepedia varies; "location" is often not a system, but we include it as a last resort.
+        body_param_names=["system", "star system", "starsystem", "location"],
+        # This is the key to mapping cases like Hoth via "Hoth system locations"
+        use_category_system_hints=True,
+        fetch_wikitext=STARWARS_FETCH_PLANET_WIKITEXT,
+        source_label=source_label,
     )
 
-
-def build_starwars() -> dict:
-    return build_catalog(
-        franchise="Star Wars",
-        api_base="https://starwars.fandom.com/api.php",
-        systems_category="Star systems",
-        planets_category="Planets",
-        # Wookieepedia: common parameters differ; include 'location' as a fallback.
-        planet_param_names=["system", "star system", "starsystem", "location"],
-        fetch_planet_wikitext=STARWARS_FETCH_PLANET_WIKITEXT,
-        max_planets=STARWARS_MAX_PLANETS,
-        use_category_system_hints=STARWARS_USE_CATEGORY_SYSTEM_HINTS,
-        source_label="Wookieepedia (MediaWiki Action API)",
-    )
+    systems_out = sorted(system_index.values(), key=lambda s: s["name"].lower())
+    return {
+        "meta": {
+            "franchise": franchise,
+            "source": source_label + baseline_note,
+            "generatedAt": generated_at,
+            "planetEnrichment": planet_summary,
+            "includesMoons": STARWARS_INCLUDE_MOONS,
+        },
+        "systems": systems_out,
+    }
 
 
 def main() -> None:
@@ -515,13 +586,13 @@ def main() -> None:
     catalogs_dir = base_dir / "catalogs"
     catalogs_dir.mkdir(parents=True, exist_ok=True)
 
-    startrek = build_startrek()
+    startrek = build_startrek_catalog(catalogs_dir)
     (catalogs_dir / "startrek_star_systems_catalog.json").write_text(
         json.dumps(startrek, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
-    starwars = build_starwars()
+    starwars = build_starwars_catalog(catalogs_dir)
     (catalogs_dir / "starwars_star_systems_catalog.json").write_text(
         json.dumps(starwars, ensure_ascii=False, indent=2),
         encoding="utf-8",

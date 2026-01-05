@@ -1,8 +1,8 @@
-name: Build Fictional Stars catalogs
+name: Build Fictional Stars catalogs (weekly deep refresh)
 
 on:
   schedule:
-    - cron: "17 3 * * *"
+    - cron: "17 3 * * 0"
   workflow_dispatch: {}
 
 permissions:
@@ -11,6 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
 
     defaults:
       run:
@@ -26,19 +27,27 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build catalogs (systems-only, reliable)
+      - name: Build catalogs (Star Trek + Star Wars, planets included)
         env:
-          STARTREK_FETCH_PLANET_WIKITEXT: "0"
+          STARTREK_FETCH_PLANET_WIKITEXT: "1"
+          STARWARS_FETCH_PLANET_WIKITEXT: "1"
+
+          STARWARS_INCLUDE_MOONS: "1"
+
+          CATALOG_BATCH_SIZE: "20"
+          CATALOG_THROTTLE_S: "0.15"
+
+          STARTREK_MAX_CATEGORIES: "8000"
+          STARWARS_MAX_CATEGORIES: "8000"
         run: python scripts/build_catalogs.py
 
       - name: Commit updates (if any)
         run: |
           cd "${GITHUB_WORKSPACE}"
 
-          # Stage first (this captures new/untracked files too)
+          # Stage first so new/untracked JSONs are included
           git add "Fictional Stars/catalogs/"*.json
 
-          # Now check staged changes
           if git diff --cached --quiet; then
             echo "No changes."
             exit 0
@@ -49,4 +58,3 @@ jobs:
 
           git commit -m "chore: weekly deep refresh (fictional star catalogs)"
           git push
-
