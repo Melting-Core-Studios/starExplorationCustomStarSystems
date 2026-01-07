@@ -58,7 +58,7 @@ PY
             echo "Upstream is JSON; copied to $OUT"
           else
             echo "Upstream not detected as JSON; attempting CSV->JSON conversion"
-            python3 scripts/convert_csv_to_json.py public/data/upstream.raw "$OUT"
+            python3 NASA_Data/scripts/convert_csv_to_json.py public/data/upstream.raw "$OUT"
           fi
 
           python3 - <<'PY'
