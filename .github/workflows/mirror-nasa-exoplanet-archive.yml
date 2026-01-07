@@ -30,13 +30,9 @@ jobs:
           fi
 
           mkdir -p public/data
+          
+          curl -L "${NASA_SOURCE_URL}"             -H "User-Agent: MCS-Education-Solar-Systems-Explorer (dataset mirror; contact: you@example.com)"             --fail --retry 5 --retry-delay 2             -o public/data/upstream.raw
 
-          curl -L "${NASA_SOURCE_URL}" \
-            -H "User-Agent: MCS-Education-Solar-Systems-Explorer (dataset mirror; contact: you@example.com)" \
-            --fail --retry 5 --retry-delay 2 \
-            -o public/data/upstream.raw
-
-          # Basic sanity: non-empty
           test -s public/data/upstream.raw
 
       - name: Normalize to JSON (supports JSON or CSV upstream)
@@ -45,14 +41,13 @@ jobs:
 
           OUT="public/data/nasa-exoplanet-archive-data.json"
 
-          # Heuristic: if first non-whitespace char is '{' or '[', treat as JSON
           FIRST="$(python3 - <<'PY'
-import pathlib, re
-data = pathlib.Path("public/data/upstream.raw").read_bytes()
-m = re.search(rb'\S', data)
-print(chr(data[m.start()]) if m else "")
-PY
-)"
+          import pathlib, re
+          data = pathlib.Path("public/data/upstream.raw").read_bytes()
+          m = re.search(rb'\S', data)
+          print(chr(data[m.start()]) if m else "")
+          PY
+          )"
           if [ "$FIRST" = "{" ] || [ "$FIRST" = "[" ]; then
             cp public/data/upstream.raw "$OUT"
             echo "Upstream is JSON; copied to $OUT"
@@ -62,13 +57,13 @@ PY
           fi
 
           python3 - <<'PY'
-import json, pathlib
-p = pathlib.Path("public/data/nasa-exoplanet-archive-data.json")
-obj = json.loads(p.read_text("utf-8"))
-if not isinstance(obj, (list, dict)):
-  raise SystemExit("Unexpected JSON top-level type: " + type(obj).__name__)
-print("JSON OK. Type:", type(obj).__name__, "Size bytes:", p.stat().st_size)
-PY
+          import json, pathlib
+          p = pathlib.Path("public/data/nasa-exoplanet-archive-data.json")
+          obj = json.loads(p.read_text("utf-8"))
+          if not isinstance(obj, (list, dict)):
+            raise SystemExit("Unexpected JSON top-level type: " + type(obj).__name__)
+          print("JSON OK. Type:", type(obj).__name__, "Size bytes:", p.stat().st_size)
+          PY
 
       - name: Build manifest.json
         env:
