@@ -1,92 +1,7 @@
-import argparse, csv, json, math, os, re, time
+import argparse, json, math, os, re, time
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 import requests
-
-# ESA Gaia Archive TAP synchronous endpoint.
-# Used to fetch per-component astrometry (RA/Dec/parallax) for Gaia DR3 source_ids.
-GAIA_TAP_SYNC_URL = "https://gea.esac.esa.int/tap-server/tap/sync"
-
-def normalize_gaia_dr3_id(v):
-    """Return Gaia DR3 source_id as a digit-only string, or None."""
-    if v is None or v == "":
-        return None
-    if isinstance(v, bool):
-        return None
-    if isinstance(v, int):
-        return str(v)
-    if isinstance(v, float):
-        if not math.isfinite(v):
-            return None
-        return str(int(v))
-    s = str(v).strip()
-    if not s:
-        return None
-    # Sometimes APIs prepend labels (e.g., "Gaia DR3 ..."); keep only digits.
-    digits = re.sub(r"\D+", "", s)
-    return digits if digits else None
-
-def _delta_ra_deg(ra_deg, ra0_deg):
-    """Smallest RA difference in degrees in [-180, 180]."""
-    d = (ra_deg - ra0_deg + 540.0) % 360.0 - 180.0
-    return d
-
-def _chunks(lst, n):
-    for i in range(0, len(lst), n):
-        yield lst[i:i+n]
-
-def fetch_gaia_astrometry(source_ids, session, chunk_size=1800, tries=4):
-    """Fetch Gaia DR3 astrometry for a list of Gaia DR3 source_ids.
-
-    Returns: dict[source_id_str] -> {"ra":deg,"dec":deg,"parallax":mas}
-    """
-    out = {}
-    if not source_ids:
-        return out
-
-    # Synchronous queries commonly enforce ~2000 row limits; keep chunks below that.
-    ids = [sid for sid in source_ids if sid]
-    for part in _chunks(ids, chunk_size):
-        adql = (
-            "SELECT source_id, ra, dec, parallax "
-            "FROM gaiadr3.gaia_source "
-            f"WHERE source_id IN ({','.join(part)})"
-        )
-        payload = {
-            "REQUEST": "doQuery",
-            "LANG": "ADQL",
-            "FORMAT": "csv",
-            "QUERY": adql,
-        }
-        last = None
-        for i in range(tries):
-            try:
-                r = session.post(GAIA_TAP_SYNC_URL, data=payload, timeout=(20, 900))
-                r.raise_for_status()
-                text = r.text or ""
-                # Gaia TAP returns CSV (or a VOTable/error html). Guard CSV parse.
-                if "source_id" not in text.splitlines()[0:1][0] if text.splitlines() else True:
-                    # Not CSV header; treat as transient.
-                    raise RuntimeError("Unexpected Gaia TAP response format")
-                reader = csv.DictReader(text.splitlines())
-                for row in reader:
-                    sid = normalize_gaia_dr3_id(row.get("source_id"))
-                    if not sid:
-                        continue
-                    ra = to_num(row.get("ra"))
-                    dec = to_num(row.get("dec"))
-                    plx = to_num(row.get("parallax"))
-                    if ra is None or dec is None:
-                        continue
-                    out[sid] = {"ra": ra, "dec": dec, "parallax": plx}
-                break
-            except Exception as e:
-                last = e
-                time.sleep(2.0 * (i + 1))
-        else:
-            # Partial enrichment is acceptable; keep building the catalog.
-            # (We don't raise; we just proceed without Gaia positions for this chunk.)
-            pass
-    return out
 
 CONSTELLATION_GENITIVE={"And":"Andromedae","Ant":"Antliae","Aps":"Apodis","Aqr":"Aquarii","Aql":"Aquilae","Ara":"Arae","Ari":"Arietis","Aur":"Aurigae","Boo":"Bootis","Cae":"Caeli","Cam":"Camelopardalis","Cap":"Capricorni","Car":"Carinae","Cas":"Cassiopeiae","Cen":"Centauri","Cep":"Cephei","Cet":"Ceti","Cha":"Chamaeleontis","Cir":"Circini","CMa":"Canis Majoris","CMi":"Canis Minoris","Cnc":"Cancri","Col":"Columbae","Com":"Comae Berenices","CrA":"Coronae Australis","CrB":"Coronae Borealis","Crt":"Crateris","Cru":"Crucis","Crv":"Corvi","CVn":"Canum Venaticorum","Cyg":"Cygni","Del":"Delphini","Dor":"Doradus","Dra":"Draconis","Equ":"Equulei","Eri":"Eridani","For":"Fornacis","Gem":"Geminorum","Gru":"Gruis","Her":"Herculis","Hor":"Horologii","Hya":"Hydrae","Hyi":"Hydri","Ind":"Indi","Lac":"Lacertae","LMi":"Leonis Minoris","Leo":"Leonis","Lep":"Leporis","Lib":"Librae","Lup":"Lupi","Lyn":"Lyncis","Lyr":"Lyrae","Men":"Mensae","Mic":"Microscopii","Mon":"Monocerotis","Mus":"Muscae","Nor":"Normae","Oct":"Octantis","Oph":"Ophiuchi","Ori":"Orionis","Pav":"Pavonis","Peg":"Pegasi","Per":"Persei","Phe":"Phoenicis","Pic":"Pictoris","PsA":"Piscis Austrini","Psc":"Piscium","Pup":"Puppis","Pyx":"Pyxidis","Ret":"Reticuli","Scl":"Sculptoris","Sco":"Scorpii","Sct":"Scuti","Ser":"Serpentis","Sex":"Sextantis","Sge":"Sagittae","Sgr":"Sagittarii","Tau":"Tauri","Tel":"Telescopii","TrA":"Trianguli Australis","Tri":"Trianguli","Tuc":"Tucanae","UMa":"Ursae Majoris","UMi":"Ursae Minoris","Vel":"Velorum","Vir":"Virginis","Vol":"Volantis","Vul":"Vulpeculae"}
 
@@ -139,11 +54,12 @@ def format_exoplanet_display_name(host, pl_name_raw, letter_raw):
     host_name = beautify_system_name(host_raw)
     pl_name = ("" if pl_name_raw is None else str(pl_name_raw)).strip()
     letter = ("" if letter_raw is None else str(letter_raw)).strip()
+    # Prefer the archive-provided planet name; keep the conventional lowercase planet letter
+    # to avoid confusion with stellar component designations (A/B/C).
     if pl_name:
-        pl_name = re.sub(r"\s+([a-z])$", lambda m: " " + m.group(1).upper(), pl_name)
         if not re.fullmatch(r"[A-Za-z]", pl_name):
             return beautify_system_name(pl_name)
-    L = letter.upper() if letter else "B"
+    L = (letter.lower() if letter else "b")
     return (host_name + " " + L).strip() if host_name else L
 
 def to_num(x):
@@ -155,10 +71,130 @@ def to_num(x):
     except Exception:
         return None
 
+def normalize_gaia_dr3_id(v):
+    """Return a Gaia DR3 source_id as a digit-only string (or None).
+
+    The Exoplanet Archive exposes gaia_dr3_id as a character column, so it may
+    arrive as digits, whitespace-padded, or (rarely) in scientific notation.
+    """
+    if v is None or v == "" or isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        if not math.isfinite(v):
+            return None
+        # Floats cannot exactly represent large integers, but this is better
+        # than the prior behaviour of concatenating exponent digits.
+        return str(int(v))
+    s = str(v).strip()
+    if not s:
+        return None
+    if "e" in s.lower():
+        try:
+            d = Decimal(s)
+            if not d.is_finite():
+                return None
+            return str(int(d))
+        except (InvalidOperation, ValueError):
+            return None
+    digits = re.sub(r"\D+", "", s)
+    return digits if digits else None
+
+def fetch_gaia_tap_csv(query, session, tries=4):
+    """Run an ADQL query against the Gaia TAP endpoint and return raw CSV text."""
+    url = "https://gea.esac.esa.int/tap-server/tap/sync"
+    last = None
+    for i in range(tries):
+        try:
+            r = session.post(url, data={"REQUEST":"doQuery","LANG":"ADQL","FORMAT":"csv","QUERY":query}, timeout=(30, 900))
+            r.raise_for_status()
+            return r.text
+        except Exception as e:
+            last = e
+            time.sleep(2.0 * (i + 1))
+    raise last
+
+def _parse_gaia_csv(text):
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return [], []
+    header = [h.strip() for h in lines[0].split(",")]
+    rows = []
+    for ln in lines[1:]:
+        cols = [c.strip() for c in ln.split(",")]
+        if len(cols) != len(header):
+            continue
+        rows.append(dict(zip(header, cols)))
+    return header, rows
+
+def fetch_gaia_astrometry(source_ids, session, chunk_size=1500):
+    """Fetch Gaia DR3 astrometry + basic photometry for a list of source_ids."""
+    ids = [str(x) for x in source_ids if x]
+    ids = list(dict.fromkeys(ids))
+    out = {}
+    if not ids:
+        return out
+    for i in range(0, len(ids), chunk_size):
+        chunk = ids[i:i+chunk_size]
+        id_list = ",".join(chunk)
+        q = " ".join([
+            "select source_id, ra, dec, parallax, pmra, pmdec,",
+            "phot_g_mean_mag, bp_rp",
+            "from gaiadr3.gaia_source",
+            f"where source_id in ({id_list})"
+        ])
+        text = fetch_gaia_tap_csv(q, session=session)
+        _, rows = _parse_gaia_csv(text)
+        for r in rows:
+            sid = normalize_gaia_dr3_id(r.get("source_id"))
+            if not sid:
+                continue
+            out[sid] = {
+                "ra": to_num(r.get("ra")),
+                "dec": to_num(r.get("dec")),
+                "parallax": to_num(r.get("parallax")),
+                "pmra": to_num(r.get("pmra")),
+                "pmdec": to_num(r.get("pmdec")),
+                "gmag": to_num(r.get("phot_g_mean_mag")),
+                "bp_rp": to_num(r.get("bp_rp")),
+            }
+        time.sleep(0.12)
+    return out
+
+def fetch_gaia_astrophysical_params(source_ids, session, chunk_size=1500):
+    """Fetch Gaia DR3 GSP-Phot Teff and radius where available."""
+    ids = [str(x) for x in source_ids if x]
+    ids = list(dict.fromkeys(ids))
+    out = {}
+    if not ids:
+        return out
+    for i in range(0, len(ids), chunk_size):
+        chunk = ids[i:i+chunk_size]
+        id_list = ",".join(chunk)
+        q = " ".join([
+            "select source_id, teff_gspphot, radius_gspphot",
+            "from gaiadr3.astrophysical_parameters",
+            f"where source_id in ({id_list})"
+        ])
+        text = fetch_gaia_tap_csv(q, session=session)
+        _, rows = _parse_gaia_csv(text)
+        for r in rows:
+            sid = normalize_gaia_dr3_id(r.get("source_id"))
+            if not sid:
+                continue
+            out[sid] = {
+                "teff_gspphot": to_num(r.get("teff_gspphot")),
+                "radius_gspphot": to_num(r.get("radius_gspphot")),
+            }
+        time.sleep(0.12)
+    return out
+
 def build_exo_download_url(ps_maxrec):
     where = "default_flag=1"
     q = " ".join([
-        "select hostname,sy_snum,sy_pnum,sy_dist,ra,dec,gaia_dr3_id,cb_flag,st_teff,st_lum,st_mass,st_rad,st_spectype,",
+        "select sy_name,hostname,sy_snum,sy_pnum,sy_dist,ra,dec,gaia_dr3_id,",
+        "cb_flag,st_teff,st_lum,st_mass,st_rad,st_spectype,",
         "pl_name,pl_letter,discoverymethod,disc_year,pul_flag,ptv_flag,etv_flag,",
         "pl_orbper,pl_orbsmax,pl_rade,pl_bmasse,pl_dens,pl_insol,pl_eqt",
         "from ps",
@@ -170,7 +206,8 @@ def build_exo_download_url(ps_maxrec):
 
 def build_exo_stellarhosts_url(sh_maxrec):
     q = " ".join([
-        "select sy_name,hostname,sy_snum,sy_pnum,sy_dist,ra,dec,gaia_dr3_id,cb_flag,st_teff,st_lum,st_mass,st_rad,st_spectype",
+        "select sy_name,hostname,sy_snum,sy_dist,ra,dec,gaia_dr3_id,cb_flag,",
+        "st_teff,st_lum,st_mass,st_rad,st_spectype",
         "from stellarhosts",
         "where 1=1 and sy_snum>=2",
         "order by sy_name asc, hostname asc"
@@ -206,7 +243,15 @@ def build_stellar_maps(sh_rows):
             host_to_system[host] = sys_name
     return stars_by_system, host_to_system
 
-def ingest_rows(rows, source_label, stars_by_system=None, host_to_system=None, gaia_astrometry=None, planet_cap=16):
+def ingest_rows(
+    rows,
+    source_label,
+    stars_by_system=None,
+    host_to_system=None,
+    planet_cap=16,
+    gaia_astrometry=None,
+    gaia_ap=None,
+):
     if not isinstance(rows, list):
         raise ValueError("Expected rows array")
     by_system = {}
@@ -247,14 +292,57 @@ def ingest_rows(rows, source_label, stars_by_system=None, host_to_system=None, g
             sy_name_raw = sys_key
             sy_name = beautify_system_name(sy_name_raw)
             aliases = build_system_aliases(sy_name_raw, sy_name)
-            stars = None
+            # ---- Stars (deduped) -------------------------------------------------
+            AU_PER_PC = 206264.80624709636
+            primary_gid = normalize_gaia_dr3_id(r.get("gaia_dr3_id"))
+            dist_pc = to_num(r.get("sy_dist"))
+
+            def _row_score(sr):
+                # Prefer rows with more populated astrophysical fields.
+                score = 0
+                for k in ("st_teff","st_rad","st_mass","st_lum","st_spectype","gaia_dr3_id"):
+                    v = sr.get(k)
+                    if v is None or v == "":
+                        continue
+                    score += 1
+                return score
+
+            stars = []
+
             if stars_by_system and sy_name_raw in stars_by_system:
                 lst = stars_by_system.get(sy_name_raw) or []
                 if lst:
-                    stars = []
-                    # Prefer the star whose hostname matches the planetary host as the primary.
-                    lst = sorted(lst, key=lambda sr: (str(sr.get('hostname') or '').strip() != host, str(sr.get('hostname') or '').strip()))
-                    for i, sr in enumerate(lst):
+                    groups = {}
+                    for sr in lst:
+                        if not isinstance(sr, dict):
+                            continue
+                        gid = normalize_gaia_dr3_id(sr.get("gaia_dr3_id"))
+                        hn0 = ("" if sr.get("hostname") is None else str(sr.get("hostname"))).strip()
+                        key = gid or ("name:" + hn0.lower())
+                        groups.setdefault(key, []).append(sr)
+
+                    picked = []
+                    for _, group in groups.items():
+                        best = max(group, key=_row_score)
+                        picked.append(best)
+
+                    def _sort_key(sr):
+                        gid = normalize_gaia_dr3_id(sr.get("gaia_dr3_id"))
+                        hn = ("" if sr.get("hostname") is None else str(sr.get("hostname"))).strip()
+                        is_primary = 1 if (primary_gid and gid == primary_gid) else 0
+                        # Component suffix ordering if present (A/B/C...).
+                        m = re.search(r"\s([A-Z])$", hn.strip())
+                        comp = (ord(m.group(1)) - ord('A') + 1) if m else 999
+                        return (-is_primary, comp, hn.lower())
+
+                    picked.sort(key=_sort_key)
+
+                    for i, sr in enumerate(picked):
+                        gid = normalize_gaia_dr3_id(sr.get("gaia_dr3_id"))
+                        hn = ("" if sr.get("hostname") is None else str(sr.get("hostname"))).strip()
+                        if not hn:
+                            hn = host if i == 0 else f"{host} companion {i+1}"
+
                         teff2 = to_num(sr.get("st_teff"))
                         mass2 = to_num(sr.get("st_mass"))
                         rad2 = to_num(sr.get("st_rad"))
@@ -262,15 +350,19 @@ def ingest_rows(rows, source_label, stars_by_system=None, host_to_system=None, g
                         v2 = to_num(sr.get("st_lum"))
                         if v2 is not None:
                             lum2 = 10 ** v2
+
+                        # Gaia GSP-Phot enrichment (Teff + radius).
+                        if gid and gaia_ap and gid in gaia_ap:
+                            ap = gaia_ap[gid]
+                            if teff2 is None and ap.get("teff_gspphot") is not None:
+                                teff2 = ap.get("teff_gspphot")
+                            if rad2 is None and ap.get("radius_gspphot") is not None:
+                                rad2 = ap.get("radius_gspphot")
+
                         if lum2 is None and teff2 is not None and rad2 is not None:
                             t2 = teff2 / 5772.0
                             lum2 = (rad2 * rad2) * (t2 ** 4)
-                        a_au = 0.0 if i == 0 else 0.18 * i
-                        p_days = 0.0 if i == 0 else (25 + i * 7 if cat == "Binary stars" else (50 + i * 12))
-                        ph = 0.0 if i == 0 else 0.17 * i
-                        hn = sr.get("hostname")
-                        hn = str(hn).strip() if isinstance(hn, str) and hn.strip() else (host if i == 0 else f"{host} companion {i+1}")
-                        gaia_id = normalize_gaia_dr3_id(sr.get("gaia_dr3_id"))
+
                         st = {
                             "name": beautify_system_name(hn),
                             "type": "star",
@@ -278,77 +370,72 @@ def ingest_rows(rows, source_label, stars_by_system=None, host_to_system=None, g
                             "radius": rad2,
                             "tempK": teff2,
                             "lum": lum2,
-                            "gaiaDr3Id": gaia_id,
-                            "orbitAU": a_au,
-                            "periodDays": p_days,
-                            "phase": ph
+                            "gaiaDr3Id": gid,
                         }
                         stars.append({k:v for k,v in st.items() if v is not None})
-                    if stars:
-                        stars[0]["orbitAU"] = 0.0
-                        stars[0]["periodDays"] = 0.0
-                        stars[0]["phase"] = 0.0
 
-                        # If Gaia astrometry is available, compute physically-based component offsets.
-                        # We project separations onto the sky plane (RA/Dec) and convert to AU using system distance.
-                        # 1 arcsec at 1 pc equals 1 AU.
-                        if gaia_astrometry and len(stars) >= 2:
-                            # Use system distance in pc when available (from PS row), else fall back to Gaia parallax.
-                            dist_pc = to_num(r.get("sy_dist"))
-                            # Choose a reference star with Gaia coordinates.
-                            ref_idx = 0
-                            if not stars[0].get("gaiaDr3Id"):
-                                for j, s in enumerate(stars):
-                                    if s.get("gaiaDr3Id"):
-                                        ref_idx = j
-                                        break
-                            ref_id = stars[ref_idx].get("gaiaDr3Id")
-                            ref_ast = gaia_astrometry.get(ref_id) if ref_id else None
-                            if ref_ast:
-                                if dist_pc is None:
-                                    plx = to_num(ref_ast.get("parallax"))
-                                    if plx is not None and plx > 0:
-                                        dist_pc = 1000.0 / plx
-                                if dist_pc is not None and dist_pc > 0:
-                                    ra0 = to_num(ref_ast.get("ra"))
-                                    dec0 = to_num(ref_ast.get("dec"))
-                                    if ra0 is not None and dec0 is not None:
-                                        dec0r = math.radians(dec0)
-                                        for j, s in enumerate(stars):
-                                            sid = s.get("gaiaDr3Id")
-                                            ast = gaia_astrometry.get(sid) if sid else None
-                                            if j == ref_idx or not ast:
-                                                s["posAU"] = [0.0, 0.0, 0.0]
-                                                s["posSource"] = "gaia_dr3" if ast else None
-                                                continue
-                                            ra = to_num(ast.get("ra"))
-                                            dec = to_num(ast.get("dec"))
-                                            if ra is None or dec is None:
-                                                continue
-                                            dra_deg = _delta_ra_deg(ra, ra0)
-                                            ddec_deg = dec - dec0
-                                            dx_arcsec = dra_deg * math.cos(dec0r) * 3600.0
-                                            dz_arcsec = ddec_deg * 3600.0
-                                            x_au = dx_arcsec * dist_pc
-                                            z_au = dz_arcsec * dist_pc
-                                            s["posAU"] = [x_au, 0.0, z_au]
-                                            s["posSource"] = "gaia_dr3"
-                                        # Ensure the reference star is at the origin.
-                                        stars[ref_idx]["posAU"] = [0.0, 0.0, 0.0]
-                                        stars[ref_idx]["posSource"] = "gaia_dr3"
-            if stars is None:
+            # Fallback: single-star systems or systems with no stellarhosts rows.
+            if not stars:
+                gid = primary_gid
+                teff1 = teff
+                rad1 = rad
+                # Optional Gaia enrichment for single stars as well.
+                if gid and gaia_ap and gid in gaia_ap:
+                    ap = gaia_ap[gid]
+                    if teff1 is None and ap.get("teff_gspphot") is not None:
+                        teff1 = ap.get("teff_gspphot")
+                    if rad1 is None and ap.get("radius_gspphot") is not None:
+                        rad1 = ap.get("radius_gspphot")
+                lum1 = lum
+                if lum1 is None and teff1 is not None and rad1 is not None:
+                    t1 = teff1 / 5772.0
+                    lum1 = (rad1 * rad1) * (t1 ** 4)
                 st = {
                     "name": beautify_system_name(host),
                     "type": "star",
                     "mass": mass if mass is not None else 1.0,
-                    "radius": rad if rad is not None else 1.0,
-                    "tempK": teff if teff is not None else 5772.0,
-                    "lum": lum,
-                    "orbitAU": 0.0,
-                    "periodDays": 0.0,
-                    "phase": 0.0
+                    "radius": rad1 if rad1 is not None else 1.0,
+                    "tempK": teff1 if teff1 is not None else 5772.0,
+                    "lum": lum1,
+                    "gaiaDr3Id": gid,
                 }
                 stars = [{k:v for k,v in st.items() if v is not None}]
+
+            # Per-star positions from Gaia astrometry (projected on-sky separation).
+            try:
+                if gaia_astrometry and primary_gid and primary_gid in gaia_astrometry:
+                    base = gaia_astrometry[primary_gid]
+                    # If the Exoplanet Archive doesn't provide sy_dist, fall back to Gaia parallax.
+                    if dist_pc is None:
+                        par = base.get("parallax")
+                        if par is not None and par > 0:
+                            dist_pc = 1000.0 / par
+                    if dist_pc is None:
+                        raise ValueError("Missing distance")
+                    ra0 = base.get("ra")
+                    dec0 = base.get("dec")
+                    if ra0 is not None and dec0 is not None:
+                        k = dist_pc * AU_PER_PC * (math.pi / 180.0)
+                        cdec = math.cos(math.radians(dec0))
+                        for s in stars:
+                            gid = s.get("gaiaDr3Id")
+                            if not gid or gid not in gaia_astrometry:
+                                continue
+                            if gid == primary_gid:
+                                s["posAU"] = [0.0, 0.0, 0.0]
+                                continue
+                            g = gaia_astrometry[gid]
+                            ra = g.get("ra")
+                            dec = g.get("dec")
+                            if ra is None or dec is None:
+                                continue
+                            dra = (ra - ra0 + 180.0) % 360.0 - 180.0
+                            ddec = (dec - dec0)
+                            x = dra * cdec * k
+                            z = ddec * k
+                            s["posAU"] = [float(x), 0.0, float(z)]
+            except Exception:
+                pass
             cb0 = True if to_num(r.get("cb_flag")) == 1 else False
             sys = {
                 "category": cat,
@@ -430,30 +517,32 @@ def main():
     sh_rows = fetch_json(sh_url, sess)
     stars_by_system, host_to_system = build_stellar_maps(sh_rows)
 
-    # Gaia enrichment: fetch RA/Dec/parallax for the Gaia DR3 source_ids of stellar components
-    # in systems that appear in the PS query results. This lets us compute physically-based
-    # projected separations for multi-star systems.
-    planet_system_keys = set()
-    if isinstance(ps_rows, list) and host_to_system:
-        for r in ps_rows:
-            if not isinstance(r, dict):
+    # Gaia enrichment is limited to multi-star systems (stellarhosts table is
+    # already filtered to sy_snum>=2). This keeps the Gaia TAP workload
+    # manageable while fixing the star placement problem comprehensively.
+    gaia_ids = []
+    if isinstance(sh_rows, list):
+        for sr in sh_rows:
+            if not isinstance(sr, dict):
                 continue
-            host = r.get("hostname") or r.get("pl_hostname") or ""
-            host = str(host).strip()
-            if not host:
-                continue
-            planet_system_keys.add(host_to_system.get(host, host))
+            gid = normalize_gaia_dr3_id(sr.get("gaia_dr3_id"))
+            if gid:
+                gaia_ids.append(gid)
+    gaia_ids = list(dict.fromkeys(gaia_ids))
 
-    gaia_ids = set()
-    if stars_by_system and planet_system_keys:
-        for sys_key in planet_system_keys:
-            for sr in (stars_by_system.get(sys_key) or []):
-                gid = normalize_gaia_dr3_id(sr.get("gaia_dr3_id"))
-                if gid:
-                    gaia_ids.add(gid)
-    gaia_astrometry = fetch_gaia_astrometry(sorted(gaia_ids), sess) if gaia_ids else {}
+    gaia_ast = fetch_gaia_astrometry(gaia_ids, session=sess) if gaia_ids else {}
+    gaia_ap = fetch_gaia_astrophysical_params(gaia_ids, session=sess) if gaia_ids else {}
+
     source_label = f"TAP/ps default_flag maxrec {args.ps_maxrec}"
-    systems = ingest_rows(ps_rows, source_label, stars_by_system, host_to_system, gaia_astrometry, planet_cap=args.planet_cap)
+    systems = ingest_rows(
+        ps_rows,
+        source_label,
+        stars_by_system,
+        host_to_system,
+        planet_cap=args.planet_cap,
+        gaia_astrometry=gaia_ast,
+        gaia_ap=gaia_ap,
+    )
     now = datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
     out = {
         "meta": {
@@ -466,8 +555,9 @@ def main():
             "datasetVersion": source_label,
             "gaiaEnrichment": {
                 "enabled": True,
-                "uniqueSourceIds": len(gaia_ids),
-                "resolved": len(gaia_astrometry)
+                "uniqueGaiaIds": len(gaia_ids),
+                "astrometryRows": len(gaia_ast),
+                "astrophysicalRows": len(gaia_ap),
             }
         },
         "systems": systems
