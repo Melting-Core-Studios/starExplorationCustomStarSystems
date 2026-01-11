@@ -2,7 +2,7 @@
   "meta": {
     "franchise": "Star Wars",
     "source": "Wookieepedia (MediaWiki Action API)",
-    "generatedAt": "2026-01-05T12:56:27+00:00",
+    "generatedAt": "2026-01-11T04:23:21+00:00",
     "planetEnrichment": {
       "enabled": true,
       "bodyPages": 7215,
@@ -121128,10 +121128,10 @@
           "name": "Rishi"
         },
         {
-          "name": "Rishi moon"
+          "name": "Rishi Moon"
         },
         {
-          "name": "Rishi Moon"
+          "name": "Rishi moon"
         },
         {
           "name": "Rishi/Legends"

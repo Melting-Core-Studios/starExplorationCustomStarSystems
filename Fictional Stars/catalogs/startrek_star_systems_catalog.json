@@ -2,14 +2,14 @@
   "meta": {
     "franchise": "Star Trek",
     "source": "Memory Alpha (MediaWiki Action API)",
-    "generatedAt": "2026-01-05T12:48:03+00:00",
+    "generatedAt": "2026-01-11T04:17:54+00:00",
     "planetEnrichment": {
       "enabled": true,
-      "bodyPages": 12024,
+      "bodyPages": 12025,
       "wikitextFetched": true,
       "categoryHintsUsed": false,
       "attached": 0,
-      "unassigned": 12024,
+      "unassigned": 12025,
       "createdSystemsFromBodies": 0
     }
   },
@@ -77799,6 +77799,18 @@
       "planets": []
     },
     {
+      "name": "Ramune",
+      "category": "Single",
+      "notes": "Auto-generated from Memory Alpha (MediaWiki Action API) category listings.",
+      "stars": [
+        {
+          "name": "Ramune primary",
+          "type": "star"
+        }
+      ],
+      "planets": []
+    },
+    {
       "name": "Rance Ward (Starfleet)",
       "category": "Single",
       "notes": "Auto-generated from Memory Alpha (MediaWiki Action API) category listings.",
@@ -81063,12 +81075,12 @@
       "planets": []
     },
     {
-      "name": "Ross (cadet)",
+      "name": "Ross (Cadet)",
       "category": "Single",
       "notes": "Auto-generated from Memory Alpha (MediaWiki Action API) category listings.",
       "stars": [
         {
-          "name": "Ross (cadet) primary",
+          "name": "Ross (Cadet) primary",
           "type": "star"
         }
       ],
@@ -110288,10 +110300,10 @@
           "name": "Ferengi casino ship"
         },
         {
-          "name": "Ferengi code"
+          "name": "Ferengi Code"
         },
         {
-          "name": "Ferengi Code"
+          "name": "Ferengi code"
         },
         {
           "name": "Ferengi Commerce Authority"
@@ -125474,6 +125486,9 @@
           "name": "Ramsey (Crewman)"
         },
         {
+          "name": "Ramune"
+        },
+        {
           "name": "Ramura"
         },
         {
@@ -126650,10 +126665,10 @@
           "name": "Rosetta Stone"
         },
         {
-          "name": "Ross (Cadet)"
+          "name": "Ross (cadet)"
         },
         {
-          "name": "Ross (cadet)"
+          "name": "Ross (Cadet)"
         },
         {
           "name": "Ross (Chief)"
