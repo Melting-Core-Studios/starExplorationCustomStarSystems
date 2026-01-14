@@ -32,6 +32,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if [ -n "$(git status --porcelain)" ]; then
+            git pull
             git add NASA_Data/output/nasa_stellar_objects_data.json
             git commit -m "Update NASA stellar objects dataset"
             git push
