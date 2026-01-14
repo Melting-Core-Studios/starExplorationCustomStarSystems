@@ -24,6 +24,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if [ -n "$(git status --porcelain)" ]; then
+            git pull
             git add NASA_Data/output/nasa-exoplanet-archive-limited.json NASA_Data/output/nasa-exoplanet-archive-full.json
             git commit -m "Update NASA Exoplanet Archive datasets"
             git push
