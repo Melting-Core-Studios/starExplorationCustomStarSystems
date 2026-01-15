@@ -1,0 +1,85 @@
+{
+    "id": "voyager1",
+    "title": "Voyager 1",
+    "subtitle": "Jupiter → Saturn → Interstellar Space",
+    "type": "mission-deep-space",
+    "tags": ["probe", "deep-space", "grand-tour"],
+  
+    "assets": {
+      "model": {
+        "url": "https://raw.githubusercontent.com/Melting-Core-Studios/MCS_Education_Resources/refs/heads/main/NASA_Data/models/Voyager.glb",
+        "scale": 1.0,
+        "rotationDeg": [0, 0, 0]
+      }
+    },
+  
+    "ephemeris": {
+      "mode": "static-feed",
+      "manifestUrl": "https://raw.githubusercontent.com/Melting-Core-Studios/MCS_Education_Resources/refs/heads/main/NASA_Data/events_in_our_solar_system/output/voyager1/manifest.json",
+      "center": "solar-system-barycenter",
+      "trail": { "enabled": true }
+    },
+  
+    "timeline": {
+      "stages": [
+        {
+          "name": "Launch",
+          "whenUtc": "1977-09-05T12:56:00Z",
+          "text": "Voyager 1 launched from Cape Canaveral aboard a Titan IIIE–Centaur to begin the Voyager Grand Tour.",
+          "media": [
+            {
+              "caption": "Voyager 1 launch (Titan IIIE–Centaur)",
+              "credit": "NASA",
+              "source": "https://commons.wikimedia.org/wiki/Category:Voyager_1_launch",
+              "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Voyager_1_Launch.jpg?width=1600"
+            }
+          ]
+        },
+        {
+          "name": "Jupiter flyby",
+          "whenUtc": "1979-03-05T00:00:00Z",
+          "text": "Voyager 1’s Jupiter encounter provided key gravity assist to reach Saturn and returned landmark observations of the Jovian system.",
+          "media": [
+            {
+              "caption": "Jupiter (Voyager 1)",
+              "credit": "NASA / JPL",
+              "source": "https://commons.wikimedia.org/wiki/File:Jupiter_-_Voyager_1_(46027301945).png",
+              "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Jupiter_-_Voyager_1_(46027301945).png?width=1600"
+            },
+            {
+              "caption": "Jupiter time-lapse sequence (Voyager 1)",
+              "credit": "NASA / JPL",
+              "source": "https://commons.wikimedia.org/wiki/File:Jupiter_from_Voyager_1.gif",
+              "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Jupiter_from_Voyager_1.gif?width=1200"
+            }
+          ]
+        },
+        {
+          "name": "Saturn flyby",
+          "whenUtc": "1980-11-12T00:00:00Z",
+          "text": "Voyager 1’s Saturn flyby included a close pass of Titan, redirecting the spacecraft out of the ecliptic plane toward interstellar space.",
+          "media": [
+            {
+              "caption": "Saturn as a crescent (Voyager 1)",
+              "credit": "NASA / JPL",
+              "source": "https://commons.wikimedia.org/wiki/File:Voyager_1_Saturn_(30737246885).jpg",
+              "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Voyager_1_Saturn_(30737246885).jpg?width=1600"
+            }
+          ]
+        },
+        {
+          "name": "Heliopause crossing",
+          "whenUtc": "2012-08-25T00:00:00Z",
+          "text": "Voyager 1 entered interstellar space after crossing the heliopause, continuing to return measurements from beyond the heliosphere.",
+          "media": [
+            {
+              "caption": "Voyager 1 goes interstellar (distance graphic)",
+              "credit": "NASA / JPL-Caltech",
+              "source": "https://commons.wikimedia.org/wiki/File:PIA17046_-_Voyager_1_Goes_Interstellar.jpg",
+              "url": "https://commons.wikimedia.org/wiki/Special:FilePath/PIA17046_-_Voyager_1_Goes_Interstellar.jpg?width=1600"
+            }
+          ]
+        }
+      ]
+    }
+  }

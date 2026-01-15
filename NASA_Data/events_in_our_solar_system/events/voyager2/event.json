@@ -1,0 +1,43 @@
+{
+    "id": "voyager2",
+    "title": "Voyager 2",
+    "subtitle": "Grand Tour (Jupiter → Neptune)",
+    "type": "mission-deep-space",
+  
+    "assets": {
+      "model": {
+        "url": "https://.../NASA_Data/models/Voyager.glb",
+        "scale": 1.0,
+        "rotationDeg": [0, 0, 0]
+      }
+    },
+  
+    "ephemeris": {
+      "mode": "static-feed",
+      "manifestUrl": "https://raw.githubusercontent.com/Melting-Core-Studios/MCS_Education_Resources/refs/heads/main/NASA_Data/events_in_our_solar_system/output/voyager2/manifest.json",
+      "center": "solar-system-barycenter",
+      "trail": { "enabled": true }
+    },
+  
+    "timeline": {
+      "stages": [
+        {
+          "name": "Launch",
+          "whenUtc": "1977-08-20T14:29:00Z",
+          "text": "Voyager 2 launched before Voyager 1 and later became the only spacecraft to visit Uranus and Neptune."
+        },
+        {
+          "name": "Jupiter flyby",
+          "whenUtc": "1979-07-09T00:00:00Z",
+          "text": "Gravity assist redirected Voyager 2 toward Saturn.",
+          "media": [
+            {
+              "caption": "Jupiter (Voyager 2)",
+              "credit": "NASA/JPL",
+              "url": "https://.../images/voyager2/jupiter.jpg"
+            }
+          ]
+        }
+      ]
+    }
+  }
